@@ -22,10 +22,12 @@ def main():
         ex = extract_bytes(f.name, f.read_bytes())
         ev = evaluate(ex["text"], role, roles, places)
         decision, reason = classify(ev, ex["warnings"])
-        rows.append({"file": f.name, "basic_pct": ev["basic_pct"], "bonus": ev["bonus"], "final_score": ev["score"], "decision": decision,
+        rows.append({"file": f.name, "basic_pct": ev["basic_pct"], "good_to_have_pct": ev["good_pct"],
+                     "weighted_good_to_have": ev["bonus"], "score": ev["score"], "decision": decision,
                      "warnings": " | ".join(ex["warnings"]), "missing": "; ".join(ev["missing"]),
                      "explanation": explain(ev, decision)})
-        print(f"{f.name:40s} basic {ev['basic_pct']:>5.1f}%  +{ev['bonus']:<4} final {ev['score']:>3}  {decision}")
+        print(f"{f.name:40s} basic {ev['basic_pct']:>5.1f}%  good {ev['good_pct']:>5.1f}%  "
+              f"score {ev['score']:>5.1f}  {decision}")
     if rows:
         with open(out, "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)

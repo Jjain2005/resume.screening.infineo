@@ -12,6 +12,14 @@ ENV/
 # Environment variables
 .env
 .env.*
+Credentials.json
+credentials.json
+token.json
+
+# Local resumes and screening results
+downloads/
+*_results*.csv
+sheet_test_results.csv
 
 # OS generated files
 .DS_Store

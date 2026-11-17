@@ -5,8 +5,8 @@ import io, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pymupdf
-from src.resume_reader import extract_bytes, tesseract_available
-from src.evaluator import evaluate, classify
+from src.resume_reader import extract_bytes, ocr_available
+from src.evaluator import evaluate, classify, GOOD_TO_HAVE_WEIGHT, SCORE_PASS_LINE
 from src.role_config import load_roles
 
 ROLES = load_roles()
@@ -40,6 +40,65 @@ def check(name, cond):
 
 def main():
     ok = True
+    def decision_case(basic_met, basic_total, good_pct=0):
+        basic_pct = 100 * basic_met / basic_total
+        return dict(basic_met=basic_met, basic_total=basic_total, basic_pct=basic_pct,
+                    good_pct=good_pct, score=basic_pct + GOOD_TO_HAVE_WEIGHT * good_pct,
+                    blocked={"rejected": False}, india_only=False, india={"passed": True, "error": False})
+
+    ok &= check("Basic floor rejects below 30%",
+                classify(decision_case(2, 10, 100))[0] == "REJECT")
+    ok &= check("Basic floor rejects fewer than two matched requirements",
+                classify(decision_case(1, 2, 100))[0] == "REJECT")
+    ok &= check("score exactly 45 selects",
+                classify(decision_case(3, 10, 60))[0] == "SELECT")
+    ok &= check("score below 45 rejects",
+                classify(decision_case(3, 10, 59.9))[0] == "REJECT")
+    ok &= check("extraction warnings still force manual review",
+                classify(decision_case(10, 10, 100), ["OCR warning"])[0] == "MANUAL REVIEW")
+    expected_new_roles = {
+        "Founder's Associate Intern": 10,
+        "DevOps Intern": 10,
+        "Game Developer Intern": 7,
+        "Curriculum Developer Intern": 10,
+    }
+    ok &= check("four new roles load with expected grouped basic requirements",
+                all(role in ROLES and len(ROLES[role]["basic"]) == count
+                    for role, count in expected_new_roles.items()))
+    new_role_samples = {
+        "Founder's Associate Intern": (
+            "EXPERIENCE\n- Led business development research and competitor analysis for a startup, "
+            "prepared business strategy and business analysis in Excel and Google Sheets, made a PowerPoint "
+            "presentation, managed the project, communicated findings, and solved operational problems."
+        ),
+        "DevOps Intern": (
+            "SKILLS\nLinux, GitHub, Docker, CI/CD, AWS, Bash, networking, Python, Kubernetes\n"
+            "PROJECTS\n- Deployed a Dockerized app to AWS with a continuous integration and delivery pipeline."
+        ),
+        "Game Developer Intern": (
+            "SKILLS\nUnity, C#, game development, game design, 2D game development, gameplay programming, OOP\n"
+            "PROJECTS\n- Built a playable 2D Unity game in C# with gameplay programming and object-oriented design."
+        ),
+        "Curriculum Developer Intern": (
+            "SKILLS\nCurriculum Development, Content Development, Instructional Design, Lesson Planning, "
+            "Educational Content, Research, Learning Objectives, Content Writing, Subject Knowledge, PowerPoint\n"
+            "PROJECTS\n- Developed a curriculum with lesson plans and educational content aligned to learning objectives."
+        ),
+    }
+    new_role_results = {
+        role: evaluate(text, role, ROLES)
+        for role, text in new_role_samples.items()
+    }
+    ok &= check("new role examples satisfy their required alternatives",
+                all(ev["basic_pct"] >= 60 for ev in new_role_results.values()))
+    game_ev = new_role_results["Game Developer Intern"]
+    ok &= check("game role accepts Unity and C# without requiring Unreal Engine or C++",
+                game_ev["basic_pct"] == 100 and not any(
+                    term in game_ev["missing"] for term in ("Unity / Unreal Engine", "C# / C++")))
+    devops_ev = new_role_results["DevOps Intern"]
+    ok &= check("DevOps role recognizes CI/CD and AWS alternatives",
+                devops_ev["rows"][3]["found"] and devops_ev["rows"][4]["found"])
+
     # 1 text PDF
     d = pdf_from_lines(STRONG)
     ex = extract_bytes("strong.pdf", d.tobytes())
@@ -67,7 +126,7 @@ def main():
     ok &= check("two-column: wrapped bullet re-joined (RAG demonstrated)",
                 any(r["requirement"].startswith("Retrieval") and r["status"] == "demonstrated" for r in ev["rows"]))
     # 4 scanned
-    if tesseract_available():
+    if ocr_available():
         src = pdf_from_lines(STRONG); out = pymupdf.open()
         for p in src:
             pix = p.get_pixmap(dpi=150); pg = out.new_page(width=p.rect.width, height=p.rect.height)
@@ -75,10 +134,21 @@ def main():
         ex = extract_bytes("scanned.pdf", out.tobytes())
         ev = evaluate(ex["text"], "AI Engineer Intern", ROLES); dec, _r = classify(ev, ex["warnings"])
         print("scanned:", ev["basic_pct"], ev["score"], dec, ex["warnings"], ex["notes"])
-        ok &= check("scanned PDF: OCR used", ex["pages"][0]["used_ocr"])
-        ok &= check("scanned PDF: text recovered, basic >= 60%", ev["basic_pct"] >= 60)
+        ok &= check("scanned PDF: OCR used and text recovered",
+                    ex["pages"][0]["used_ocr"] and "Python" in ex["text"])
+        ok &= check("scanned PDF: OCR recovers a strong resume score", ev["basic_pct"] >= 60)
     else:
-        print("SKIP scanned test (Tesseract not installed)")
+        print("SKIP scanned tests (no OCR engine installed)")
+    # 4b standalone image OCR uses the available OCR engine
+    image_doc = pdf_from_lines(["OCR IMAGE TEST: Python and Docker"])
+    pix = image_doc[0].get_pixmap(dpi=180)
+    image_buf = io.BytesIO()
+    from PIL import Image
+    Image.frombytes("RGB", (pix.width, pix.height), pix.samples).save(image_buf, format="PNG")
+    image_ex = extract_bytes("ocr-test.png", image_buf.getvalue())
+    ok &= check("PNG: OCR used and text recovered",
+                bool(image_ex["pages"]) and image_ex["pages"][0]["used_ocr"]
+                and "Python" in image_ex["text"])
     # 5 blank / unreadable -> warning -> manual review
     blank = pymupdf.open(); blank.new_page()
     ex = extract_bytes("blank.pdf", blank.tobytes())
@@ -101,11 +171,24 @@ def main():
                   "Backend Developer Intern", ROLES); dec, _r = classify(ev, ex["warnings"])
     print("backend docx:", ev["basic_pct"], ev["score"], dec, ex["warnings"])
     ok &= check("DOCX backend candidate => SELECT", dec == "SELECT")
-    # 7 borderline: basics 4/8 = 50% -> MANUAL REVIEW; good-to-have alone cannot rescue
+    # 6b DOCX containing a pasted image and little native text
+    image_docx = Document()
+    image_docx.add_paragraph("Scan")
+    image_docx.add_picture(io.BytesIO(image_buf.getvalue()))
+    image_docx_buf = io.BytesIO()
+    image_docx.save(image_docx_buf)
+    image_docx_ex = extract_bytes("embedded-image.docx", image_docx_buf.getvalue())
+    ok &= check("DOCX: OCR used on embedded image",
+                "OCR IMAGE TEST" in image_docx_ex["text"] and
+                any("OCR used on images embedded" in note for note in image_docx_ex["notes"]))
+    # 7 Good-to-have percentage contributes exactly one quarter of its value to score.
     t = "SKILLS\nPython, LLM, RAG, Prompt Engineering\nGood extras: FastAPI, Flask, LangChain, Hugging Face, Claude, ChatGPT, Gemini, JSON\n" + "Interests: reading and travel. " * 12
     ev = evaluate(t, "AI Engineer Intern", ROLES); dec, _r = classify(ev, [])
-    print("borderline:", ev["basic_pct"], ev["bonus"], ev["score"], dec)
-    ok &= check("good-to-have bonus cannot lift a 50% basic candidate to SELECT", dec == "MANUAL REVIEW" and ev["bonus"] > 5)
+    print("weighted score:", ev["basic_pct"], ev["good_pct"], ev["score"], dec)
+    ok &= check("good-to-have contributes 0.25 × its exact match percentage",
+                ev["good_pct"] > 0 and ev["score"] == ev["basic_pct"] + 0.25 * ev["good_pct"])
+    ok &= check("score uses unrounded Basic and Good-to-have percentages",
+                ev["score"] == ev["basic_pct"] + GOOD_TO_HAVE_WEIGHT * ev["good_pct"])
     # 8 India-only rule (six roles): "India" or +91 required, else REJECT; other roles unaffected
     body = "SKILLS\nCanva, Photoshop, Figma, Instagram, Content Creation, Copywriting, Digital Marketing, Video Editing, Reels\n" + \
            "PROJECTS\n- Designed posters, logos and banners in Canva and Photoshop for a college fest.\n" + "Interests: reading and travel. " * 12

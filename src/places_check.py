@@ -41,7 +41,14 @@ def get_api_key(env_file=None):
 SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 DETAILS_URL = "https://places.googleapis.com/v1/places/{id}?languageCode=en"
 
+# A resolved result only counts as the candidate's location if Google says it is a geographic place
+# (city, region, address...). Businesses/institutions (e.g. what "Graphic Designer" or "IIT Bombay" return) are ignored.
+GEO_TYPES = {"locality", "sublocality", "sublocality_level_1", "neighborhood", "colloquial_area", "postal_town",
+             "administrative_area_level_1", "administrative_area_level_2", "administrative_area_level_3",
+             "country", "postal_code", "street_address", "route", "premise", "subpremise", "political"}
+
 _cache = {}   # query -> {"code": "IN", "name": "India"}  (successful lookups only)
+_city_cache = {}  # normalized city -> [{"code": "IN", "name": "India"}, ...]
 
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _URL = re.compile(r"(https?://\S+|www\.\S+|\b[\w-]+\.(?:com|in|io|org|net|co)\b\S*)", re.I)
@@ -50,6 +57,11 @@ _LABEL = re.compile(r"^\s*(?:current |present |permanent |home |residential )?"
                     r"(address|location|city|country|residence|resides in|based in|lives in)\s*[:\-–]?\s*", re.I)
 _LABELLED = re.compile(r"^\s*(?:current |present |permanent |home |residential )?"
                        r"(address|location|city|country|residence|resides in|based in|lives in)\b", re.I)
+_LABEL_ONLY = re.compile(r"^(e-?mail|phone|mobile|contact|linkedin|github|behance|portfolio|website|web|dob|"
+                         r"date of birth|nationality|languages?|gender|summary|profile|objective)$", re.I)
+_JOB_TITLE = re.compile(r"\b(designer|developer|engineer|intern(ship)?|manager|student|analyst|writer|marketer|"
+                        r"executive|specialist|fresher|trainee|associate|consultant|freelancer?|creator|editor|"
+                        r"architect|scientist|tester|recruiter|coordinator)\b", re.I)
 _PAGE = re.compile(r"\[Page \d+\]")
 
 
@@ -72,14 +84,46 @@ def lookup_country(query, api_key, transport=None):
     if not places:
         _cache[query] = {}               # "Google found nothing" is cached too (errors are not)
         return {}
-    det = transport("GET", DETAILS_URL.format(id=places[0]["id"]), {**hdr, "X-Goog-FieldMask": "addressComponents"})
+    det = transport("GET", DETAILS_URL.format(id=places[0]["id"]),
+                    {**hdr, "X-Goog-FieldMask": "addressComponents,types"})
+    geo = bool(GEO_TYPES & set((det or {}).get("types", [])))
     for comp in (det or {}).get("addressComponents", []):
         if "country" in comp.get("types", []):
-            res = {"code": (comp.get("shortText") or "").upper(), "name": comp.get("longText") or comp.get("shortText")}
+            res = {"code": (comp.get("shortText") or "").upper(), "name": comp.get("longText") or comp.get("shortText"),
+                   "geo": geo}
             _cache[query] = res
             return res
     _cache[query] = {}
     return {}
+
+
+def lookup_city_countries(city, api_key, transport=None):
+    """Return distinct countries Google associates with a city name; cache successful empty/results by city."""
+    key = re.sub(r"\s+", " ", city).strip().casefold()
+    if not key:
+        return []
+    if key in _city_cache:
+        return _city_cache[key]
+    transport = transport or default_transport
+    hdr = {"Content-Type": "application/json", "X-Goog-Api-Key": api_key}
+    found = transport("POST", SEARCH_URL, {**hdr, "X-Goog-FieldMask": "places.id"},
+                      {"textQuery": city.strip(), "maxResultCount": 10, "languageCode": "en"})
+    places = (found or {}).get("places") or []
+    countries = {}
+    for place in places:
+        det = transport("GET", DETAILS_URL.format(id=place["id"]),
+                        {**hdr, "X-Goog-FieldMask": "addressComponents,types"})
+        if not (GEO_TYPES & set((det or {}).get("types", []))):
+            continue
+        for comp in (det or {}).get("addressComponents", []):
+            if "country" in comp.get("types", []):
+                code = (comp.get("shortText") or "").upper()
+                if code:
+                    countries[code] = comp.get("longText") or comp.get("shortText") or code
+                break
+    result = [{"code": code, "name": countries[code]} for code in sorted(countries)]
+    _city_cache[key] = result
+    return result
 
 
 def _clean_segment(seg, name):
@@ -93,116 +137,35 @@ def _clean_segment(seg, name):
     return seg
 
 
-# Words that label a contact field but are not a place, and words that make a line a sentence or an education line.
-_FIELD_LABELS = {"contact us", "contact", "contact me", "contact details", "contact information", "get in touch",
-                 "phone", "mobile", "email", "e mail", "portfolio", "linkedin", "github", "website", "skill",
-                 "skills", "language", "languages", "address", "location", "personal details", "about me"}
-_SENTENCE_WORDS = {"i", "am", "my", "is", "are", "was", "with", "about", "through", "for", "to", "by", "and",
-                   "the", "a", "an", "of"}
-_EDU_WORDS = re.compile(r"\b(school|college|university|institute|academy|vidyalaya|vidyalay|polytechnic|"
-                        r"iit|nit|iiit)\b", re.I)
-_PIN = re.compile(r"\b\d{6}\b")
-
-
-def _place_like(seg):
-    """True when the text looks like place text (a short address fragment), not a sentence, a label or a skill."""
-    from .evaluator import norm                                    # local import avoids a circular import
-    words = seg.split()
-    n = norm(seg)
-    if not words or len(words) > 8 or n in _FIELD_LABELS:
-        return False
-    if re.search(r"[.!?]\s+[A-Za-z]", seg):                       # two sentences glued together
-        return False
-    if len(words) > 2 and sum(len(w) == 1 and w.isalpha() for w in words) > len(words) / 2:
-        return False                                              # spaced-out title like "G R A P H I C"
-    if len(set(n.split()) & _SENTENCE_WORDS) >= 2 or "i" in n.split():
-        return False                                              # prose such as "I am a creative ..."
-    return True
-
-
-def _has_place_shape(raw, allow_bracket=True):
-    """Address fragments usually contain a comma, a 6-digit PIN code or (under an Address label) a bracketed state
-    code such as "(MP)". The fallback for lines near the top does NOT accept brackets: job lines such as
-    "Curriculum Designer (UK curriculum)" must never be sent to Google."""
-    return "," in raw or bool(_PIN.search(raw)) or (allow_bracket and "(" in raw)
-
-
-def location_queries(text, name="", max_queries=4, include_top=True):
-    """Place-text candidates from the resume, most reliable first:
-      1. the value on the same line as an Address/Location label ("Address: Nagpur, Maharashtra"),
-      2. the lines that follow a label standing alone on its own line (two-column / sidebar layouts, where the
-         value can be a few lines below), joined when an address line ends with a comma,
-      3. contact-style lines near the top (only lines that look like an address: comma, bracket or PIN code).
-    Names, e-mails, phones, URLs, sentences, section titles, field labels and education lines are never sent."""
+def location_queries(text, name="", max_queries=6):
+    """Place-text candidates from the resume, most reliable first (labelled lines, then top contact lines)."""
     from .evaluator import detect_header, forms_for, norm   # local import avoids a circular import
     lines = [l.strip() for l in text.splitlines() if l.strip() and not _PAGE.fullmatch(l.strip())
              and not l.strip().lower().startswith("links:")]
-    queries, seen = [], set()
-
-    def add(seg):
-        """Clean and test one piece of place text; True when the query limit has been reached."""
-        seg = _clean_segment(seg, name)
-        n = norm(seg)
-        if (len(seg) < 3 or len(seg) > 90 or not re.search(r"[A-Za-z]{3}", seg) or detect_header(seg)
-                or n in seen or not _place_like(seg)):
-            return False
-        parts = [norm(p) for p in seg.split(",") if p.strip()]   # skip skill/tool lists and statements
-        if any(forms_for(p)[0] != p or len(forms_for(p)) > 1 for p in parts if p):
-            return False
-        seen.add(n)
-        queries.append(seg)
-        return len(queries) >= max_queries
-
-    # 1 + 2: Address/Location-labelled lines
-    for i, line in enumerate(lines):
-        if not _LABELLED.match(line):
-            continue
-        same_line = _clean_segment(line, name)
-        if same_line:                                   # the value is on the label's own line
-            for seg in re.split(r"[|•·●▪■]", line):
-                if add(seg):
-                    return queries
-            continue
-        joined, cur, prev_comma = [], "", False         # label alone on its line: look at the next lines
-        for j in range(i + 1, min(len(lines), i + 9)):
-            raw = lines[j]
-            if detect_header(raw.rstrip(":")) or norm(raw) in _FIELD_LABELS or _LABELLED.match(raw):
-                break
-            cleaned = _clean_segment(raw, name)
-            usable = (cleaned and not _EDU_WORDS.search(cleaned) and _place_like(cleaned)
-                      and (_has_place_shape(raw) or j == i + 1 or prev_comma))
-            if usable and prev_comma and cur:
-                cur += ", " + cleaned                   # "Swaroop Nagar colony," + "Biaora, (MP)"
-            elif usable:
-                if cur:
-                    joined.append(cur)
-                cur = cleaned
-            else:
-                if cur:
-                    joined.append(cur)
-                cur = ""
-            prev_comma = bool(usable and raw.rstrip().endswith(","))
-        if cur:
-            joined.append(cur)
-        for seg in sorted(joined, key=lambda x: -x.count(",")):   # fullest address first
-            if add(seg):
-                return queries
-
-    if not include_top:                 # caller wants labelled address lines only
-        return queries
-
-    # 3: contact-style lines near the top
+    labelled = [l for l in lines if _LABELLED.match(l)]
     top = lines[:15]
     if top and re.fullmatch(r"[A-Za-z .'-]{2,40}", top[0]) and not _LABELLED.match(top[0]):
         top = top[1:]                    # first line that is just letters = the candidate's name; never send it
-    for line in top:
+    queries, seen = [], set()
+    for line in labelled + top:
         for seg in re.split(r"[|•·●▪■]", line):
-            if _has_place_shape(seg, allow_bracket=False) and add(seg):
+            seg = _clean_segment(seg, name)
+            n = norm(seg)
+            if (len(seg) < 3 or _LABEL_ONLY.match(seg) or _JOB_TITLE.search(seg) or len(seg) > 90 or len(seg.split()) > 12 or not re.search(r"[A-Za-z]{3}", seg)
+                    or detect_header(seg) or n in seen):
+                continue
+            # skip skill/tool lists and statements: any comma-part that is a known resume term
+            parts = [norm(p) for p in seg.split(",") if p.strip()]
+            if any(forms_for(p)[0] != p or len(forms_for(p)) > 1 for p in parts if p):
+                continue
+            seen.add(n)
+            queries.append(seg)
+            if len(queries) >= max_queries:
                 return queries
     return queries
 
 
-def make_checker(api_key, transport=None, max_queries=4):
+def make_checker(api_key, transport=None, max_queries=6):
     """Return check(text, name="") -> {status, country_code, evidence, tried}.
     status: "india" (every resolved place is in India) | "not_india" | "conflict" | "no_location" | "error"."""
     def check(text, name=""):
@@ -222,7 +185,10 @@ def make_checker(api_key, transport=None, max_queries=4):
                 errors.append(f"{type(exc).__name__}: {exc}")
                 tried.append(dict(query=q, country="", error=errors[-1]))
                 break
-            tried.append(dict(query=q, country=res.get("code", ""), error=""))
+            if res.get("code") and not res.get("geo", True):
+                tried.append(dict(query=q, country="", error="", ignored="not a place (business/institution)"))
+                continue
+            tried.append(dict(query=q, country=res.get("code", ""), error="", ignored=""))
             if res.get("code"):
                 countries.append((q, res))
         if errors and not countries:

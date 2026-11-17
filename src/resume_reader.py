@@ -7,6 +7,7 @@ Every reader returns a dict:
 `notes` are informational only (e.g. "OCR was used on page 2").
 """
 import io
+import importlib.util
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -34,6 +35,41 @@ _ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00ad"), No
 def tesseract_available() -> bool:
     if pytesseract is None:
         return False
+
+
+def rapidocr_available() -> bool:
+    return importlib.util.find_spec("rapidocr") is not None
+
+
+def ocr_engine() -> str:
+    if tesseract_available():
+        return "Tesseract"
+    if rapidocr_available():
+        return "RapidOCR"
+    return ""
+
+
+def ocr_available() -> bool:
+    return bool(ocr_engine())
+
+
+@lru_cache(maxsize=1)
+def _rapidocr_engine():
+    from rapidocr import RapidOCR
+    return RapidOCR()
+
+
+def _rapidocr_result(img: Image.Image):
+    result = _rapidocr_engine()(img.convert("RGB"))
+    items = sorted(zip(result.boxes, result.txts, result.scores),
+                   key=lambda item: (float(item[0][:, 1].mean()), float(item[0][:, 0].mean())))
+    text = "\n".join(item[1] for item in items)
+    confidence = (100 * sum(item[2] for item in items) / len(items)) if items else 0.0
+    return text, confidence
+
+
+def _rapidocr_image(img: Image.Image, lang: str):
+    return _rapidocr_result(img)
     try:
         pytesseract.get_tesseract_version()
         return True
@@ -64,8 +100,12 @@ def looks_garbled(text: str) -> bool:
 
 
 def ocr_image(img: Image.Image, lang: str = "eng"):
-    """Return (text, mean_confidence). Raises if Tesseract is unavailable."""
+    """Return (text, mean_confidence); confidence is unavailable from the PyMuPDF RapidOCR backend."""
     img = img.convert("RGB")
+    if not tesseract_available():
+        if rapidocr_available():
+            return _rapidocr_image(img, lang)
+        raise RuntimeError("No OCR engine is available; install RapidOCR or Tesseract.")
     data = pytesseract.image_to_data(img, lang=lang, config="--psm 3",
                                      output_type=pytesseract.Output.DICT)
     lines, confs, order = {}, [], []
@@ -161,7 +201,7 @@ def read_pdf(data: bytes, lang: str = "eng") -> dict:
     if doc.needs_pass and not doc.authenticate(""):
         return dict(text="", pages=[], warnings=["PDF is password-protected and could not be read."], notes=[])
 
-    ocr_ok = tesseract_available()
+    engine = ocr_engine()
     ocr_warned = False
     for i, page in enumerate(doc, start=1):
         native = clean_text(_native_page_text(page))
@@ -171,23 +211,32 @@ def read_pdf(data: bytes, lang: str = "eng") -> dict:
         needs_ocr = n_chars < PAGE_OCR_MIN_CHARS or garbled or (cov > IMAGE_HEAVY and n_chars < 500)
         text, used_ocr, conf = native, False, None
         if needs_ocr:
-            if not ocr_ok:
+            if not engine:
                 if not ocr_warned:
-                    warnings.append("Tesseract OCR is not installed, but page(s) look scanned or image-based "
-                                    "(brew install tesseract / apt install tesseract-ocr).")
+                    warnings.append("No OCR engine is installed, but page(s) look scanned or image-based "
+                                    "(install project requirements for RapidOCR, or install Tesseract).")
                     ocr_warned = True
                 warnings.append(f"Page {i}: needs OCR but OCR is unavailable.")
             else:
                 try:
-                    pix = page.get_pixmap(dpi=OCR_DPI, alpha=False)
-                    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                    o_text, conf = ocr_image(img, lang)
+                    if engine == "Tesseract":
+                        pix = page.get_pixmap(dpi=OCR_DPI, alpha=False)
+                        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                        o_text, conf = ocr_image(img, lang)
+                    else:
+                        pix = page.get_pixmap(dpi=OCR_DPI, alpha=False)
+                        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                        o_text, conf = _rapidocr_result(img)
                     o_text = clean_text(o_text)
-                    if alnum_count(o_text) > n_chars * 1.15 or garbled:
+                    if alnum_count(o_text) and (n_chars < PAGE_OCR_MIN_CHARS or garbled
+                                                or alnum_count(o_text) > n_chars * 1.15):
                         text, used_ocr = o_text, True
-                        notes.append(f"Page {i}: OCR used (confidence {conf:.0f}).")
-                        if conf < LOW_OCR_CONF:
+                        confidence_note = f" (confidence {conf:.0f})" if conf is not None else ""
+                        notes.append(f"Page {i}: {engine} OCR used{confidence_note}.")
+                        if conf is not None and conf < LOW_OCR_CONF:
                             warnings.append(f"Page {i}: low OCR confidence ({conf:.0f}); text may be inaccurate.")
+                    elif not alnum_count(o_text):
+                        warnings.append(f"Page {i}: {engine} OCR returned no readable text.")
                 except Exception as exc:
                     warnings.append(f"Page {i}: OCR failed ({exc}).")
         if garbled and not used_ocr:
@@ -265,8 +314,8 @@ def read_docx(data: bytes, lang: str = "eng") -> dict:
         imgs = [r.target_part.blob for r in doc.part.rels.values()
                 if "image" in r.reltype and hasattr(r, "target_part")]
         if imgs:
-            if not tesseract_available():
-                warnings.append("DOCX contains images and little text, but Tesseract OCR is not installed.")
+            if not ocr_available():
+                warnings.append("DOCX contains images and little text, but no OCR engine is installed.")
             else:
                 ocr_parts = []
                 for blob in imgs:
@@ -274,13 +323,15 @@ def read_docx(data: bytes, lang: str = "eng") -> dict:
                         t, conf = ocr_image(Image.open(io.BytesIO(blob)), lang)
                         if alnum_count(t) > 20:
                             ocr_parts.append(t)
-                            if conf < LOW_OCR_CONF:
+                            if conf is not None and conf < LOW_OCR_CONF:
                                 warnings.append(f"Low OCR confidence ({conf:.0f}) on an image inside the DOCX.")
-                    except Exception:
-                        continue
+                        else:
+                            warnings.append("An image inside the DOCX contained no readable OCR text.")
+                    except Exception as exc:
+                        warnings.append(f"OCR failed on an image inside the DOCX: {exc}")
                 if ocr_parts:
                     text = clean_text(text + "\n" + "\n".join(ocr_parts))
-                    notes.append("OCR used on images embedded in the DOCX.")
+                    notes.append(f"{ocr_engine()} OCR used on images embedded in the DOCX.")
     if alnum_count(text) < MIN_DOC_CHARS:
         warnings.append(f"Very little text extracted ({alnum_count(text)} characters); the resume may be unreadable.")
     return dict(text=text, pages=[dict(page=1, text=text, used_ocr=False, ocr_conf=None,
@@ -290,21 +341,23 @@ def read_docx(data: bytes, lang: str = "eng") -> dict:
 
 # --------------------------------------------------------------------------- images / txt
 def read_image(data: bytes, lang: str = "eng") -> dict:
-    if not tesseract_available():
-        return dict(text="", pages=[], warnings=["Image resumes need Tesseract OCR, which is not installed."], notes=[])
+    if not ocr_available():
+        return dict(text="", pages=[], warnings=["Image resumes need an OCR engine; install project requirements or Tesseract."], notes=[])
     try:
         text, conf = ocr_image(Image.open(io.BytesIO(data)), lang)
     except Exception as exc:
         return dict(text="", pages=[], warnings=[f"Image could not be read: {exc}"], notes=[])
     text = clean_text(text)
     warnings = []
-    if conf < LOW_OCR_CONF:
+    if conf is not None and conf < LOW_OCR_CONF:
         warnings.append(f"Low OCR confidence ({conf:.0f}); text may be inaccurate.")
     if alnum_count(text) < MIN_DOC_CHARS:
         warnings.append(f"Very little text extracted ({alnum_count(text)} characters).")
-    return dict(text=text, pages=[dict(page=1, text=text, used_ocr=True, ocr_conf=round(conf, 1),
+    return dict(text=text, pages=[dict(page=1, text=text, used_ocr=True,
+                                       ocr_conf=None if conf is None else round(conf, 1),
                                        chars=len(text), image_coverage=1.0)],
-                warnings=warnings, notes=[f"OCR used (confidence {conf:.0f})."])
+                warnings=warnings, notes=[f"{ocr_engine()} OCR used" +
+                                         (f" (confidence {conf:.0f})." if conf is not None else ".")])
 
 
 def read_txt(data: bytes) -> dict:

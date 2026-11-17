@@ -2,7 +2,7 @@
 
 basic        - the BASIC requirements. Each requirement is a list of acceptable alternatives; finding ANY
                ONE of them anywhere in the resume satisfies that requirement (e.g. ["Python","Java",...]).
-good_to_have - bonus skills from role_requirements.json; never required.
+good_to_have - additional scored skills from role_requirements.json; they are not required individually.
 """
 import json
 from pathlib import Path
@@ -39,6 +39,17 @@ RULES = {
     "Sales & Marketing Intern": [["Sales"], ["Lead Generation", "Business Development"], ["Digital Marketing"],
         ["Market Research"], ["Customer Relationship Management"], ["Cold Calling", "Cold Outreach"],
         ["Email Marketing"]],
+    "Founder's Associate Intern": [["Business Development"], ["Market Research"], ["Competitor Analysis"],
+        ["Business Strategy"], ["Business Analysis"], ["Excel", "Google Sheets"], ["PowerPoint", "Google Slides"],
+        ["Project Management"], ["Communication"], ["Problem Solving"]],
+    "DevOps Intern": [["Linux"], ["Git", "GitHub"], ["Docker"], ["CI/CD", "Continuous Integration"],
+        ["AWS", "Azure", "Google Cloud", "GCP"], ["Shell Scripting", "Bash"], ["Networking Basics", "Networking"],
+        ["Python"], ["Deployment"], ["Kubernetes"]],
+    "Game Developer Intern": [["Unity", "Unreal Engine"], ["C#", "C++"], ["Game Development"], ["Game Design"],
+        ["2D Game Development", "3D Game Development"], ["Gameplay Programming"], ["OOP", "Object-Oriented Programming"]],
+    "Curriculum Developer Intern": [["Curriculum Development"], ["Content Development"], ["Instructional Design"],
+        ["Lesson Planning"], ["Educational Content"], ["Research"], ["Learning Objectives"], ["Content Writing"],
+        ["Subject Knowledge"], ["PowerPoint", "Google Slides"]],
 }
 
 
@@ -55,34 +66,6 @@ BLOCKED_COUNTRIES = {
     "Pakistan": {"words": ["pakistan", "pakistani"], "phone_codes": ["92"]},
     "Bangladesh": {"words": ["bangladesh", "bangladeshi"], "phone_codes": ["880"]},
 }
-
-
-# For the INDIA_ONLY_ROLES: a resume that shows ANY country other than India is REJECTED (even if it also says
-# "India"). A country is "shown" when its name appears as a word, or a phone number starts with a non-India code.
-# Deliberately left out because they are also common names/words: Georgia, Jordan, Chad, Mali, Niger, Jersey.
-OTHER_COUNTRY_NAMES = [
-    "Afghanistan", "Albania", "Algeria", "Andorra", "Angola", "Argentina", "Armenia", "Australia", "Austria",
-    "Azerbaijan", "Bahamas", "Bahrain", "Bangladesh", "Barbados", "Belarus", "Belgium", "Belize", "Benin",
-    "Bhutan", "Bolivia", "Bosnia", "Botswana", "Brazil", "Brunei", "Bulgaria", "Burkina Faso", "Burundi",
-    "Cambodia", "Cameroon", "Canada", "Chile", "China", "Colombia", "Congo", "Costa Rica", "Croatia", "Cuba",
-    "Cyprus", "Czech Republic", "Czechia", "Denmark", "Dominican Republic", "Ecuador", "Egypt", "El Salvador",
-    "England", "Eritrea", "Estonia", "Ethiopia", "Fiji", "Finland", "France", "Gabon", "Gambia", "Germany",
-    "Ghana", "Greece", "Guatemala", "Guinea", "Guyana", "Haiti", "Honduras", "Hong Kong", "Hungary", "Iceland",
-    "Indonesia", "Iran", "Iraq", "Ireland", "Israel", "Italy", "Ivory Coast", "Jamaica", "Japan", "Kazakhstan",
-    "Kenya", "Kosovo", "Kuwait", "Kyrgyzstan", "Laos", "Latvia", "Lebanon", "Lesotho", "Liberia", "Libya",
-    "Liechtenstein", "Lithuania", "Luxembourg", "Madagascar", "Malawi", "Malaysia", "Maldives", "Malta",
-    "Mauritius", "Mexico", "Moldova", "Monaco", "Mongolia", "Montenegro", "Morocco", "Mozambique", "Myanmar",
-    "Namibia", "Nepal", "Netherlands", "New Zealand", "Nicaragua", "Nigeria", "North Korea", "North Macedonia",
-    "Norway", "Oman", "Pakistan", "Palestine", "Panama", "Paraguay", "Peru", "Philippines", "Poland",
-    "Portugal", "Qatar", "Romania", "Russia", "Rwanda", "Saudi Arabia", "Scotland", "Senegal", "Serbia",
-    "Sierra Leone", "Singapore", "Slovakia", "Slovenia", "Somalia", "South Africa", "South Korea", "South Sudan",
-    "Spain", "Sri Lanka", "Sudan", "Suriname", "Sweden", "Switzerland", "Syria", "Taiwan", "Tajikistan",
-    "Tanzania", "Thailand", "Togo", "Trinidad", "Tunisia", "Turkey", "Turkmenistan", "Uganda", "Ukraine",
-    "United Arab Emirates", "United Kingdom", "United States", "United States of America", "Uruguay",
-    "Uzbekistan", "Venezuela", "Vietnam", "Viet Nam", "Wales", "Yemen", "Zambia", "Zimbabwe",
-]
-# Abbreviations are matched CASE-SENSITIVELY (so "us"/"uk" inside normal words or URLs never match).
-OTHER_COUNTRY_ABBREVIATIONS = ["USA", "U.S.A.", "U.S.A", "UK", "U.K.", "UAE", "U.A.E.", "KSA"]
 
 
 def load_roles():

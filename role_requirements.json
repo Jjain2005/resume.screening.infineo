@@ -69,8 +69,8 @@
     "essential": [
       "Python",
       "Automation",
-      "Workflow Automation",
-      "API Integration",
+      "Workflow",
+      "Integration",
       "API",
       "Scripting",
       "Webhooks"
@@ -460,5 +460,133 @@
       "Meta Pixel"
     ],
     "note": "Recognize sales tools, CRM platforms, marketing channels and measurable campaign or lead-generation work. Do not require every channel or tool."
+  },
+  "Founder's Associate Intern": {
+    "essential": [
+      "Business Development",
+      "Market Research",
+      "Competitor Analysis",
+      "Business Strategy",
+      "Business Analysis",
+      "Excel / Google Sheets",
+      "PowerPoint / Google Slides",
+      "Project Management",
+      "Communication",
+      "Problem Solving"
+    ],
+    "good_to_have": [
+      "Startup Operations",
+      "Financial Analysis",
+      "Business Planning",
+      "Data Analysis",
+      "Lead Generation",
+      "Sales Strategy",
+      "Client Relationship Management",
+      "Growth Strategy",
+      "CRM Tools",
+      "Fundraising",
+      "Investor Relations",
+      "Product Management",
+      "Entrepreneurship",
+      "Presentation Skills"
+    ],
+    "note": "Actual business projects, startup experience, case studies, market research, and evidence of taking ownership of projects carry significant weight. Candidates do not need experience in every business function."
+  },
+  "DevOps Intern": {
+    "essential": [
+      "Linux",
+      "Git / GitHub",
+      "Docker",
+      "CI/CD",
+      "AWS / Azure / Google Cloud",
+      "Shell / Scripting / Bash",
+      "Networking Basics",
+      "Python",
+      "Deployment",
+      "Kubernetes"
+    ],
+    "good_to_have": [
+      "Jenkins",
+      "GitHub Actions",
+      "Terraform",
+      "Ansible",
+      "Nginx",
+      "Linux Administration",
+      "Monitoring",
+      "Prometheus",
+      "Grafana",
+      "Infrastructure as Code (IaC)",
+      "AWS EC2",
+      "AWS S3",
+      "YAML",
+      "Kubernetes Helm",
+      "Containerization"
+    ],
+    "note": "Actual deployment projects, Dockerized applications, CI/CD pipelines, cloud deployments, and GitHub repositories carry significant weight. Candidates do not need experience with every cloud provider or DevOps tool."
+  },
+  "Game Developer Intern": {
+    "essential": [
+      "Unity",
+      "C#",
+      "Unreal Engine",
+      "C++",
+      "Game Development",
+      "Game Design",
+      "2D Game Development",
+      "3D Game Development",
+      "Gameplay Programming",
+      "Object-Oriented Programming (OOP)"
+    ],
+    "good_to_have": [
+      "Godot",
+      "Blender",
+      "Unreal Blueprints",
+      "Physics Engine",
+      "Animation",
+      "Level Design",
+      "Game Mechanics",
+      "AI for Games",
+      "Multiplayer Development",
+      "Shader Programming",
+      "UI / UX for Games",
+      "3D Modeling",
+      "Git",
+      "AR / VR Development",
+      "Particle Systems"
+    ],
+    "note": "Playable games, game prototypes, GitHub repositories, itch.io projects, and actual gameplay implementations carry significant weight. Unity and Unreal Engine are alternatives; a strong project using either engine is sufficient."
+  },
+  "Curriculum Developer Intern": {
+    "essential": [
+      "Curriculum Development",
+      "Content Development",
+      "Instructional Design",
+      "Lesson Planning",
+      "Educational Content",
+      "Research",
+      "Learning Objectives",
+      "Content Writing",
+      "Subject Knowledge",
+      "Microsoft PowerPoint / Google Slides"
+    ],
+    "good_to_have": [
+      "E-Learning",
+      "Course Development",
+      "Assessment Design",
+      "Learning Management Systems (LMS)",
+      "Quiz Development",
+      "Educational Technology",
+      "Teaching Experience",
+      "Academic Research",
+      "Technical Writing",
+      "Storyboarding",
+      "Canva",
+      "Moodle",
+      "SCORM",
+      "Bloom's Taxonomy",
+      "Training Material Development",
+      "Video-Based Learning"
+    ],
+    "note": "Actual course materials, lesson plans, educational presentations, assignments, quizzes, tutorials, and teaching-related projects carry significant weight. Formal curriculum development experience is not required when candidates demonstrate strong educational content creation and subject knowledge."
   }
 }

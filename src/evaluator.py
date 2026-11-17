@@ -1,24 +1,25 @@
 """Local (no LLM, no network) evidence-based evaluation against a fixed role.
 
-Rule used in V1 (all numbers are PROVISIONAL and adjustable in the app sidebar):
+Decision rule:
   1. BASIC requirements come first. Basic % = requirements satisfied / total requirements. A requirement is
      satisfied when ANY of its acceptable alternatives appears ANYWHERE in the resume (whole-resume check).
-  2. Basic % >= Select threshold (default 60) -> SELECT; between Review and Select -> MANUAL REVIEW; below
-     Review -> REJECT (but never auto-reject if the resume shows role-relevant project/experience work).
-  3. Good-to-have skills never decide anything. They add a normalised bonus (max +10 points) used only for
-     the Final score / ranking: bonus = 10 x min(1, good-to-have concepts found / target).
-  4. Evidence level (demonstrated in a project/experience vs only listed) is reported for every requirement.
+  2. Reject if Basic % < 30 or fewer than two Basic requirements are met.
+  3. Score = Basic % + 0.25 x Good-to-have %. Select at score >= 45; otherwise reject.
+  4. Extraction warnings and unresolved country checks still require manual review; blocked-country and India-only
+     rules are applied as before.
+  5. Evidence level (demonstrated in a project/experience vs only listed) is reported for every requirement.
 """
-import math
 import re
 import unicodedata
 from functools import lru_cache
 
 from .concepts import CLASSES, ACTION_VERBS
-from .role_config import load_roles, BLOCKED_COUNTRIES, OTHER_COUNTRY_NAMES, OTHER_COUNTRY_ABBREVIATIONS
+from .role_config import load_roles, BLOCKED_COUNTRIES
 
-BONUS_MAX = 10
-DEFAULT_SELECT, DEFAULT_REVIEW = 60, 40
+BASIC_FLOOR_PCT = 30
+MIN_BASIC_MATCHED = 2
+SCORE_PASS_LINE = 45
+GOOD_TO_HAVE_WEIGHT = 0.25
 
 
 # --------------------------------------------------------------------------- normalisation
@@ -63,12 +64,6 @@ def forms_for(term: str):
 def _pattern(forms):
     alt = "|".join(re.escape(f) for f in forms)
     return re.compile(r"(?<![a-z0-9+#])(?:" + alt + r")s?(?![a-z0-9+#])")
-
-
-def concept_id(term: str):
-    """Stable id of the requirement's concept, so synonyms in a good-to-have list count once."""
-    ids = _class_ids(norm(term))
-    return ("c", min(ids)) if ids else ("t", norm(term))
 
 
 # --------------------------------------------------------------------------- structure of the resume
@@ -256,74 +251,6 @@ def blocked_country_check(text: str):
     return dict(rejected=False, country="", evidence="")
 
 
-_OTHER_NAMES = re.compile(r"(?<![A-Za-z])(?:" + "|".join(
-    re.escape(n).replace(r"\ ", r"\s+") for n in sorted(OTHER_COUNTRY_NAMES, key=len, reverse=True)) + r")(?![A-Za-z])", re.I)
-_OTHER_ABBR = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(
-    re.escape(a) for a in sorted(OTHER_COUNTRY_ABBREVIATIONS, key=len, reverse=True)) + r")(?![A-Za-z0-9])")
-# international phone: "+" then a 1-3 digit code then at least 8 more phone characters. India = +91.
-_INTL_PHONE = re.compile(r"(?<![\w+])\+\s?(\d{1,3})[\s-]?\(?\d[\d\s().-]{6,}\d")
-
-
-_ZONE_LABEL = re.compile(r"(?i)\b(?:permanent\s+address|current\s+address|home\s+address|address|location|residence|"
-                         r"based\s+in|city)\b\s*[:\-\u2013]\s*([^\n|\u2022\u00b7\u25cf\u25aa\u25a0]{0,100})")
-_UPPER_HEAD = re.compile(r"\b(?:PROFESSIONAL SUMMARY|CAREER OBJECTIVE|SUMMARY|OBJECTIVE|PROFILE|ABOUT ME|EDUCATION|"
-                         r"WORK EXPERIENCE|EXPERIENCE|TECHNICAL SKILLS|SKILLS|PROJECTS|CERTIFICATIONS)\b")
-
-
-def contact_zone(text: str) -> str:
-    """The part of the resume that says where the candidate lives: the header (up to the first section heading,
-    max 8 lines / 400 characters), any "Address: ..." / "Location: ..." value, and address lines found below a lone
-    "Address" label (two-column resumes). Projects, certificates, jobs and the summary are NOT part of it."""
-    lines = [l for l in text.splitlines() if l.strip()]
-    head = []
-    for l in lines[:8]:
-        if detect_header(l.strip().rstrip(":")):
-            break
-        head.append(l)
-    h = "\n".join(head)[:400]
-    m = _UPPER_HEAD.search(h)            # header and first heading can be on the same line
-    if m:
-        h = h[:m.start()]
-    parts = [h] + [m.group(1) for m in _ZONE_LABEL.finditer(text)]
-    try:
-        from .places_check import location_queries    # local import avoids a circular import
-        parts += location_queries(text, "", include_top=False)   # only lines under an Address/Location label
-    except Exception:
-        pass
-    return "\n".join(parts)
-
-
-def other_country_check(text: str):
-    """Used for the India-only roles. The candidate's country is judged from the CONTACT AREA only (see contact_zone):
-      * contact area shows India (the word or a +91 phone) and no other country -> fine.
-      * contact area shows another country and no India                          -> rejected.
-      * contact area shows BOTH                                                  -> conflict (Manual Review).
-    A foreign country name elsewhere (certificates, projects, jobs, summary) is NOT a reason to reject; it is only
-    listed in `elsewhere` so a reviewer can see it."""
-    zone = contact_zone(text)
-
-    def foreign(t):
-        found, evidence = [], []
-        for m in _OTHER_NAMES.finditer(t):
-            w = re.sub(r"\s+", " ", m.group(0)).title()
-            if w not in found:
-                found.append(w); evidence.append(f'contact area contains "{m.group(0)}"')
-        for m in _OTHER_ABBR.finditer(t):
-            if m.group(0) not in found:
-                found.append(m.group(0)); evidence.append(f'contact area contains "{m.group(0)}"')
-        return found, evidence
-
-    found, evidence = foreign(zone)
-    for m in _INTL_PHONE.finditer(zone):
-        if not re.sub(r"\D", "", m.group(0)).startswith("91"):
-            found.append("+" + m.group(1)); evidence.append(f'phone number starting with "+{m.group(1)}" in the contact area')
-            break
-    zone_india = bool(_INDIA_WORD.search(zone) or _PLUS91.search(zone))
-    elsewhere = [c for c in foreign(text)[0] if c not in found]
-    return dict(rejected=bool(found) and not zone_india, conflict=bool(found) and zone_india,
-                countries=found, evidence="; ".join(evidence[:4]), elsewhere=elsewhere[:6], contact_has_india=zone_india)
-
-
 def evaluate(text: str, role: str, roles=None, places=None):
     """`places` = optional callable from places_check.make_checker, used only for India-only roles when the
     simple "India"/+91 rule fails."""
@@ -351,22 +278,21 @@ def evaluate(text: str, role: str, roles=None, places=None):
             rows.append(dict(category="Basic requirement", requirement=label, found=False, status="not found",
                              matched_as="", section="", evidence=""))
 
-    seen, good_found = set(), 0
+    good_found = 0
     for term in cfg["good_to_have"]:
-        cid = concept_id(term)
         hit = eval_group(units, [term], full_norm, text)
-        if hit and cid not in seen:
-            seen.add(cid)
+        if hit:
             good_found += 1
-            rows.append(dict(category="Good-to-have (bonus)", requirement=term, found=True, status=hit["status"],
+            rows.append(dict(category="Good-to-have", requirement=term, found=True, status=hit["status"],
                              matched_as=hit["matched"], section=hit["section"], evidence=hit["evidence"]))
         elif not hit:
-            rows.append(dict(category="Good-to-have (bonus)", requirement=term, found=False, status="not found",
+            rows.append(dict(category="Good-to-have", requirement=term, found=False, status="not found",
                              matched_as="", section="", evidence=""))
-    good_target = max(3, math.ceil(len(cfg["good_to_have"]) * 0.25))
-    bonus = BONUS_MAX * min(1.0, good_found / good_target)
+    good_total = len(cfg["good_to_have"])
+    good_pct = 100 * good_found / max(1, good_total)
+    bonus = GOOD_TO_HAVE_WEIGHT * good_pct
 
-    # role-relevant project / experience statements (used for the "never auto-reject" safety rule)
+    # Report role-relevant project / experience statements for human review.
     every_term = {t for g in cfg["basic"] for t in g} | set(cfg["good_to_have"])
     role_pat = _pattern(tuple(sorted({f for t in every_term for f in forms_for(t)}, key=len, reverse=True)))
     practical = []
@@ -378,33 +304,26 @@ def evaluate(text: str, role: str, roles=None, places=None):
             practical.append(dict(section=section, statement=unit[:300]))
 
     total = len(cfg["basic"])
-    basic_pct = round(100 * met / max(1, total), 1)
+    basic_pct = 100 * met / max(1, total)
+    score = basic_pct + bonus
     return dict(
         role=role, basic_met=met, basic_total=total, basic_pct=basic_pct,
-        bonus=round(bonus, 1), good_found=good_found, good_target=good_target,
-        score=min(100, round(basic_pct + bonus)), listed_only=listed_only,
+        bonus=bonus, good_found=good_found, good_total=good_total, good_pct=good_pct,
+        score=score, listed_only=listed_only,
         practical_count=len(practical), practical=practical[:8], rows=rows,
         missing=[r["requirement"] for r in rows if r["category"] == "Basic requirement" and not r["found"]],
         contact=guess_contact(text), statements=len(units),
         india_only=bool(cfg.get("india_only")), india=india,
         blocked=blocked_country_check(text),
-        other_country=other_country_check(text) if cfg.get("india_only") else
-        dict(rejected=False, conflict=False, countries=[], evidence="", elsewhere=[], contact_has_india=False),
     )
 
 
-def classify(ev, warnings=None, select=DEFAULT_SELECT, review=DEFAULT_REVIEW):
+def classify(ev, warnings=None):
     """Return (decision, reason). Extraction warnings always force MANUAL REVIEW."""
     pct = ev["basic_pct"]
     if ev["blocked"]["rejected"]:
         return "REJECT", (f'Country rule (applies to every role): {ev["blocked"]["evidence"]} - {ev["blocked"]["country"]} '
                           f'resumes are rejected regardless of skills (basic requirements were {pct:.0f}%).')
-    if ev.get("india_only") and ev["other_country"]["rejected"]:
-        return "REJECT", ("India-only role: the contact/address area shows a country other than India (" +
-                          ev["other_country"]["evidence"] + f"). Rejected regardless of skills (basic requirements were {pct:.0f}%).")
-    if ev.get("india_only") and ev["other_country"].get("conflict"):
-        return "MANUAL REVIEW", ("India-only role, but the contact/address area shows India AND another country (" +
-                                 ev["other_country"]["evidence"] + "). A human must confirm where the candidate lives.")
     if warnings:
         return "MANUAL REVIEW", "Extraction warning(s): a human must check the resume text before trusting the result."
     if ev.get("india_only") and not ev["india"]["passed"] and ev["india"].get("error"):
@@ -413,22 +332,24 @@ def classify(ev, warnings=None, select=DEFAULT_SELECT, review=DEFAULT_REVIEW):
     if ev.get("india_only") and not ev["india"]["passed"]:
         return "REJECT", ('India-only role: ' + ev["india"]["evidence"] + '. Rejected regardless of skills '
                           f'(basic requirements were {pct:.0f}%).')
-    if pct >= select:
-        return "SELECT", f"Basic requirements {ev['basic_met']}/{ev['basic_total']} = {pct:.0f}% (needs {select}%)."
-    if pct >= review:
-        return "MANUAL REVIEW", f"Basic requirements {pct:.0f}% is between {review}% and {select}%."
-    if ev["practical_count"] > 0:
-        return "MANUAL REVIEW", (f"Basic requirements only {pct:.0f}%, but the resume describes "
-                                 f"{ev['practical_count']} role-relevant project/experience statement(s); not rejecting automatically.")
-    return "REJECT", f"Basic requirements only {pct:.0f}% (below {review}%) and no role-relevant project/experience found."
+    if pct < BASIC_FLOOR_PCT or ev["basic_met"] < MIN_BASIC_MATCHED:
+        return "REJECT", (f"Basic floor not met: {ev['basic_met']}/{ev['basic_total']} requirements "
+                          f"({pct:.1f}%); requires at least {MIN_BASIC_MATCHED} matched and "
+                          f"{BASIC_FLOOR_PCT}%.")
+    if ev["score"] >= SCORE_PASS_LINE:
+        return "SELECT", (f"Score {ev['score']:.1f} (Basic {pct:.1f}% + 0.25 × Good-to-have "
+                          f"{ev['good_pct']:.1f}%) meets the {SCORE_PASS_LINE} pass line.")
+    return "REJECT", (f"Score {ev['score']:.1f} (Basic {pct:.1f}% + 0.25 × Good-to-have "
+                      f"{ev['good_pct']:.1f}%) is below the {SCORE_PASS_LINE} pass line.")
 
 
 def explain(ev, decision):
     found = [r for r in ev["rows"] if r["category"] == "Basic requirement" and r["found"]]
     demo = [r["requirement"] for r in found if r["status"] == "demonstrated"]
     weak = [r["requirement"] for r in found if r["status"] != "demonstrated"]
-    parts = [f"{decision}. Basic requirements: {ev['basic_met']} of {ev['basic_total']} met ({ev['basic_pct']:.0f}%). "
-             f"Good-to-have bonus: +{ev['bonus']} ({ev['good_found']} found). Final score {ev['score']}/100."]
+    parts = [f"{decision}. Basic requirements: {ev['basic_met']} of {ev['basic_total']} met ({ev['basic_pct']:.1f}%). "
+             f"Good-to-have: {ev['good_found']} of {ev['good_total']} matched ({ev['good_pct']:.1f}%), "
+             f"weighted contribution +{ev['bonus']:.1f}. Final score {ev['score']:.1f}."]
     if demo:
         parts.append("Shown in project/experience work: " + ", ".join(demo) + ".")
     if weak:

@@ -3,8 +3,8 @@ import hashlib
 import pandas as pd
 import streamlit as st
 
-from src.resume_reader import extract_bytes, tesseract_available, SUPPORTED
-from src.evaluator import evaluate, classify, explain, DEFAULT_SELECT, DEFAULT_REVIEW
+from src.resume_reader import extract_bytes, ocr_available, ocr_engine, SUPPORTED
+from src.evaluator import evaluate, classify, explain
 from src.role_config import load_roles
 from src.places_check import make_checker, get_api_key
 
@@ -19,11 +19,10 @@ st.caption("Local only (no LLM / no API). Role requirements → full resume extr
 with st.sidebar:
     st.header("Screening setup")
     role = st.selectbox("Select internship role", list(ROLES.keys()))
-    st.subheader("Decision thresholds (on Basic %)")
-    select_at = st.slider("Select if basic requirements are at least (%)", 30, 100, DEFAULT_SELECT)
-    review_at = st.slider("Manual review if at least (%)", 0, select_at, min(DEFAULT_REVIEW, select_at))
-    st.caption("Provisional - calibrate with human-reviewed resumes. Good-to-have skills never decide the outcome; "
-               "they only add a bonus to the final score. Any extraction warning forces Manual Review.")
+    st.subheader("Decision rule")
+    st.caption("Reject if Basic is below 30% or fewer than 2 Basic requirements match. Otherwise, "
+               "Score = Basic % + 0.25 × Good-to-have %; Select at 45 or above. "
+               "Extraction warnings and unresolved country checks require Manual Review.")
     st.subheader("Country check (India-only roles)")
     api_key = get_api_key()
     use_places = st.checkbox("Confirm country with Google Places", value=bool(api_key), disabled=not api_key)
@@ -32,28 +31,26 @@ with st.sidebar:
                    "address/location text to Google. Off: the simple 'India'/+91 rule alone decides.")
     else:
         st.caption("No key in the .env file (GOOGLE_MAPS_API_KEY), so only the simple 'India'/+91 rule is used.")
-    if tesseract_available():
-        st.success("OCR ready (Tesseract found)")
+    if ocr_available():
+        st.success(f"OCR ready ({ocr_engine()} found)")
     else:
-        st.error("Tesseract not found — scanned PDFs/images cannot be read. Install it (see README).")
+        st.error("No OCR engine found — scanned PDFs/images cannot be read. Install project requirements or Tesseract (see README).")
 
 cfg = ROLES[role]
 places = make_checker(api_key) if (api_key and use_places) else None
 with st.expander(f"Fixed requirements — {role}", expanded=True):
     c1, c2 = st.columns([3, 2])
-    c1.markdown(f"**Basic requirements** — the candidate needs **{select_at}%** of these to be selected "
-                f"(**{-(-select_at * len(cfg['basic']) // 100)} of {len(cfg['basic'])}**). "
-                "Where a line lists alternatives, finding **any one** of them counts.")
+    c1.markdown(f"**Basic requirements** — at least **2 of {len(cfg['basic'])}** requirements and **30% Basic** "
+                "are required to pass the floor. Where a line lists alternatives, finding any one counts.")
     lines = []
     for i, g in enumerate(cfg["basic"], 1):
         lines.append(f"{i}. **{g[0]}**" if len(g) == 1 else f"{i}. **any of:** {', '.join(g)}")
     c1.markdown("\n".join(lines))
-    c2.markdown("**Good-to-have (bonus only, never required)**")
+    c2.markdown("**Good-to-have (scored, not individually required)**")
     c2.write(", ".join(cfg["good_to_have"]))
     st.caption("For every role: a resume showing Pakistan or Bangladesh (the word, or a +92 / +880 phone number) is rejected.")
     if cfg.get("india_only"):
-        st.warning('India-only role: a resume whose contact/address area shows another country (name, USA/UK/UAE, or a non-+91 phone) is rejected. '
-                   'It must also mention "India" or have a phone number starting with +91'
+        st.warning('India-only role: the resume must mention "India" or have a phone number starting with +91'
                    + (', or Google Places must confirm an address in India' if places else '') + '; otherwise it is rejected.')
     st.info(cfg["note"] or "Keywords are evidence signals, not an exact-match checklist.")
     st.caption("Every requirement is searched in the WHOLE resume (skills, projects, experience, education, "
@@ -78,7 +75,7 @@ if extractions:
     results = []
     for ex in extractions:
         ev = evaluate(ex["text"], role, ROLES, places)
-        decision, reasons = classify(ev, ex["warnings"], select_at, review_at)
+        decision, reasons = classify(ev, ex["warnings"])
         results.append(dict(ex=ex, ev=ev, decision=decision, reasons=reasons))
 
     st.divider()
@@ -92,14 +89,15 @@ if extractions:
     table = pd.DataFrame([{
         "File": r["ex"]["filename"], "Decision": f'{ICON[r["decision"]]} {r["decision"]}',
         "Basic %": r["ev"]["basic_pct"], "Basic met": f'{r["ev"]["basic_met"]}/{r["ev"]["basic_total"]}',
-        "Bonus (+)": r["ev"]["bonus"], "Final score": r["ev"]["score"],
+        "Good-to-have %": r["ev"]["good_pct"], "Score": r["ev"]["score"],
         "Warnings": len(r["ex"]["warnings"]),
-    } for r in results]).sort_values("Final score", ascending=False)
+    } for r in results]).sort_values("Score", ascending=False)
     st.dataframe(table, width="stretch", hide_index=True)
 
     for i, r in enumerate(results):
         ex, ev = r["ex"], r["ev"]
-        with st.expander(f'{ICON[r["decision"]]} {ex["filename"]} — Basic {ev["basic_pct"]:.0f}% (+{ev["bonus"]}) = {ev["score"]} — {r["decision"]}'):
+        with st.expander(f'{ICON[r["decision"]]} {ex["filename"]} — Basic {ev["basic_pct"]:.1f}% + '
+                         f'0.25 × Good-to-have {ev["good_pct"]:.1f}% = {ev["score"]:.1f} — {r["decision"]}'):
             if ex["warnings"]:
                 st.warning("Extraction warnings (forces Manual Review):\n\n" + "\n".join(f"- {w}" for w in ex["warnings"]))
             tab_report, tab_evidence, tab_text = st.tabs(["Report", "Requirement evidence", "Extracted text"])
@@ -108,23 +106,17 @@ if extractions:
                 st.caption("Why this decision: " + r["reasons"])
                 if ev["blocked"]["rejected"]:
                     st.markdown(f"🚫 **Blocked country: {ev['blocked']['country']}** — {ev['blocked']['evidence']}")
-                if ev["india_only"] and ev["other_country"]["rejected"]:
-                    st.markdown("🚫 **Other country found (India-only role)** — " + ev["other_country"]["evidence"])
-                if ev["india_only"] and ev["other_country"].get("conflict"):
-                    st.markdown("⚠️ **Contact area shows India and another country** — " + ev["other_country"]["evidence"])
-                if ev["india_only"] and ev["other_country"].get("elsewhere"):
-                    st.caption("Other countries mentioned outside the contact area (not used for the decision): "
-                               + ", ".join(ev["other_country"]["elsewhere"]))
                 if ev["india_only"]:
                     st.markdown(("✅ **India check passed** — " if ev["india"]["passed"] else "❌ **India check failed** — ")
                                 + ev["india"]["evidence"] + (" _(via Google Places)_" if ev["india"]["method"] == "places" else ""))
                     for t in ev["india"].get("tried", []):
-                        st.caption(f'Places query: "{t["query"]}" → {t["country"] or t["error"] or "no country found"}')
-                k = st.columns(4)
-                k[0].metric("Basic requirements", f'{ev["basic_pct"]:.0f}%', f'{ev["basic_met"]} of {ev["basic_total"]}', delta_color="off")
-                k[1].metric("Good-to-have bonus", f'+{ev["bonus"]}', f'{ev["good_found"]} found', delta_color="off")
-                k[2].metric("Final score", ev["score"])
-                k[3].metric("Only listed (no project)", ev["listed_only"])
+                        st.caption(f'Places query: "{t["query"]}" → {t["country"] or t["error"] or t.get("ignored") or "no country found"}')
+                k = st.columns(5)
+                k[0].metric("Basic requirements", f'{ev["basic_pct"]:.1f}%', f'{ev["basic_met"]} of {ev["basic_total"]}', delta_color="off")
+                k[1].metric("Good-to-have", f'{ev["good_pct"]:.1f}%', f'{ev["good_found"]} of {ev["good_total"]} found', delta_color="off")
+                k[2].metric("Weighted contribution", f'+{ev["bonus"]:.1f}', "0.25 × Good-to-have %", delta_color="off")
+                k[3].metric("Score", f'{ev["score"]:.1f}')
+                k[4].metric("Only listed (no project)", ev["listed_only"])
                 st.markdown("**Basic requirements checklist**")
                 for row in ev["rows"]:
                     if row["category"] != "Basic requirement":
@@ -162,7 +154,9 @@ if extractions:
         "file": r["ex"]["filename"], "role": role, "system_decision": r["decision"],
         "human_decision": st.session_state.get(f"human_{r['ex']['id']}", ""),
         "basic_pct": r["ev"]["basic_pct"], "basic_met": f'{r["ev"]["basic_met"]}/{r["ev"]["basic_total"]}',
-        "bonus": r["ev"]["bonus"], "final_score": r["ev"]["score"],
+        "good_to_have_pct": r["ev"]["good_pct"],
+        "good_to_have_matched": f'{r["ev"]["good_found"]}/{r["ev"]["good_total"]}',
+        "weighted_good_to_have": r["ev"]["bonus"], "score": r["ev"]["score"],
         "missing_basic": "; ".join(r["ev"]["missing"]), "warnings": " | ".join(r["ex"]["warnings"]),
     } for r in results])
     st.download_button("Download results CSV (includes your decisions for calibration)",
